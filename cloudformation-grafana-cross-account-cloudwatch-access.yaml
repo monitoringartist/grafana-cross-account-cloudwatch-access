@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Template for cross account access to CloudWatch metrics and/or
+  CloudWatch logs from Grafana. Let's say Grafana is deployed in
+  the AWS accoount AAAAAAAAAAAA and you want to allow Grafana to
+  see metrics or logs from AWS account BBBBBBBBBBBB. Allow 
+  sts:AssumeRole for used IAM role/user in the AWS account 
+  AAAAAAAAAAAA, which used by Grafana. Then create CloudFormation
+  stack from this template in the AWS account BBBBBBBBBBBB and 
+  customize it with parameters for your needs. Use stack outputs
+  (AssumeRoleArn, ExternalID) to create CloudWatch datasource in
+  your Grafana. Generated IAM role is based on Grafana IAM role 
+  doc: 
+  https://grafana.com/docs/grafana/latest/datasources/aws-cloudwatch/#cloudwatch-specific-data-source-configuration
+
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: Stack configuration
+        Parameters:
+          - Principal
+          - EnableCloudWatchMetrics
+          - EnableCloudWatchLogs
+          - LogNames
+    ParameterLabels:
+      EnableCloudWatchMetrics:
+        default: CloudWatch metrics access
+      EnableCloudWatchLogs:
+        default: CloudWatch logs access
+      LogNames:
+        default: CloudWatch logs definition
+      Principal:
+        default: Principal definition
+
+Parameters:
+  Principal:
+    Type: String
+    Description: >-
+      AWS Principal, which will have allowed access. 
+      Use exact assumed-role session principal  
+      ("arn:aws:sts::AWS-account-ID:assumed-role/role-name/role-session-name")
+      from the AWS account AAAAAAAAAAAA used by your 
+      Grafana or use arn:aws:sts::AAAAAAAAAAAA:root
+      to allow all resources from AWS account AAAAAAAAAAAA
+      (not recommended from the security perspective).
+    Default: >-
+      arn:aws:sts::AAAAAAAAAAAA:root
+  EnableCloudWatchMetrics:
+    Type: String
+    Description: Enable access to CloudWatch metrics
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  EnableCloudWatchLogs:
+    Type: String
+    Description: Enable access to CloudWatch logs
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  LogNames:
+    Type: String
+    Description: >-
+      Allowed CloudWatch logs if access to CloudWatch log is 
+      enabled. It is not recommended to allow everything 
+      (value: *). Allow only logs, which need to be 
+      visualized/queried by Grafana (e.g. /aws/lambda/* - 
+      only Lambda logs). Use comma delimited list to add 
+      multiple log names - max 4 names are supported by 
+      CloudFormation template. Please edit template if you 
+      need more.
+    Default: >-
+      /aws/lambda/*,/aws/my-custom-log-1
+
+Conditions:
+  EnableCloudWatchMetricsCondition: !Equals
+    - !Ref EnableCloudWatchMetrics
+    - true
+  EnableCloudWatchLogsCondition: !Equals
+    - !Ref EnableCloudWatchLogs
+    - true
+  EnableCloudWatchCondition: !Or 
+    - !Condition EnableCloudWatchMetricsCondition
+    - !Condition EnableCloudWatchLogsCondition
+  AllLogsCondition: !Equals
+    - !Ref LogNames
+    - "*"
+  ConditionParam0:
+    !Not [!Equals [!Select [0, !Split [",", !Sub "${LogNames},,,,"]], ""]]
+  ConditionParam1:
+    !Not [!Equals [!Select [1, !Split [",", !Sub "${LogNames},,,,"]], ""]]
+  ConditionParam2:
+    !Not [!Equals [!Select [2, !Split [",", !Sub "${LogNames},,,,"]], ""]]
+  ConditionParam3:
+    !Not [!Equals [!Select [3, !Split [",", !Sub "${LogNames},,,,"]], ""]]
+
+Resources:
+  GrafanaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref Principal
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId":
+                  Fn::Base64:
+                    !Select [2, !Split ["/", !Ref "AWS::StackId"]]
+      Tags:
+        - Key: cloudformation-stack
+          Value: !Ref 'AWS::StackName'
+      Policies:
+        - PolicyName: GrafanaRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - !If
+                - EnableCloudWatchMetricsCondition
+                - Sid: AllowReadingMetricsFromCloudWatch
+                  Effect: Allow
+                  Action:
+                    - cloudwatch:DescribeAlarmsForMetric
+                    - cloudwatch:DescribeAlarmHistory
+                    - cloudwatch:DescribeAlarms
+                    - cloudwatch:ListMetrics
+                    - cloudwatch:GetMetricData
+                    - cloudwatch:GetInsightRuleReport
+                  Resource: "*"
+                - !Ref "AWS::NoValue"
+              - !If
+                - EnableCloudWatchLogsCondition
+                - Sid: AllowReadingLogsFromCloudWatch
+                  Effect: Allow
+                  Action:
+                    - logs:DescribeLogGroups
+                    - logs:GetLogGroupFields
+                    - logs:StartQuery
+                    - logs:StopQuery
+                    - logs:GetQueryResults
+                    - logs:GetLogEvents
+                  Resource: !If
+                    - AllLogsCondition
+                    - - "*"
+                    - - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group::log-stream:"
+                      - !If
+                        - ConditionParam0
+                        - !Sub
+                          - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${logname}:*"
+                          - logname:
+                              !Select [0, !Split [",", !Sub "${LogNames},,,,"]]
+                        - !Ref "AWS::NoValue"
+                      - !If
+                        - ConditionParam1
+                        - !Sub
+                          - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${logname}:*"
+                          - logname:
+                              !Select [1, !Split [",", !Sub "${LogNames},,,,"]]
+                        - !Ref "AWS::NoValue"
+                      - !If
+                        - ConditionParam2
+                        - !Sub
+                          - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${logname}:*"
+                          - logname:
+                              !Select [2, !Split [",", !Sub "${LogNames},,,,"]]
+                        - !Ref "AWS::NoValue"
+                      - !If
+                        - ConditionParam3
+                        - !Sub
+                          - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${logname}:*"
+                          - logname:
+                              !Select [3, !Split [",", !Sub "${LogNames},,,,"]]
+                        - !Ref "AWS::NoValue"
+                - !Ref "AWS::NoValue"
+              - !If
+                - EnableCloudWatchCondition
+                - Sid: AllowReadingTagsInstancesRegionsFromEC2
+                  Effect: Allow
+                  Action:
+                    - ec2:DescribeTags
+                    - ec2:DescribeInstances
+                    - ec2:DescribeRegions
+                  Resource: "*"
+                - !Ref "AWS::NoValue"
+              - !If
+                - EnableCloudWatchCondition
+                - Sid: AllowReadingResourcesForTags
+                  Effect: Allow
+                  Action: tag:GetResources
+                  Resource: "*"
+                - !Ref "AWS::NoValue"
+
+Outputs:
+  AssumeRoleArn:
+    Description: >-
+      Assume Role ARN in the CloudWatch Grafana datasource configuration   
+    Value: !GetAtt GrafanaRole.Arn
+  ExternalID:
+    Description: >-
+      External ID in the CloudWatch Grafana datasource configuration,
+      created as base64 encoding of Cloudformation StackId
+    Value:
+      Fn::Base64:
+        !Select [2, !Split ["/", !Ref "AWS::StackId"]]
